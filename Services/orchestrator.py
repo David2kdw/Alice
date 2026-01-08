@@ -403,7 +403,34 @@ class Orchestrator:
         self._dbg(f"speaker produced={texts_before} after_cap={len(texts)} cap={cap}")
 
         # 6) Strategy 1: send one by one; stop if user interrupts mid-turn
-        sent_pairs, interrupted_user_text, interrupted_ts = self._send_with_interrupt(texts, now)
+        #    NEW: persist transcript per-bubble via emit callback.
+        sent_msgs: List[Message] = []
+
+        def emit_bubble(text: str, ts: datetime) -> None:
+            # Persist immediately (one bubble at a time)
+            if self.on_bubble_sent is not None:
+                try:
+                    self.on_bubble_sent(text, ts)
+                except Exception:
+                    pass
+
+            m = Message(role=MessageRole.ALICE, text=text, ts=ts)
+            sent_msgs.append(m)
+            self._append_recent(m)
+            if self.transcript_sink:
+                self.transcript_sink.append([m])
+
+            self._dbg(
+                f"emit_bubble ts={ts.isoformat()} chars={len(text)} "
+                f"preview={(text[:60].replace(chr(10), ' ') + ('…' if len(text) > 60 else ''))!r}"
+            )
+
+        # Send bubbles (streaming to UI should happen inside emit_bubble or via on_bubble_sent there)
+        sent_pairs, interrupted_user_text, interrupted_ts = self._send_with_interrupt(
+            texts,
+            now,
+            emit=emit_bubble,  # ✅ key
+        )
         sent_texts = [t for (t, _) in sent_pairs]
 
         self._dbg(
@@ -411,15 +438,9 @@ class Orchestrator:
             f"interrupted_ts={(interrupted_ts.isoformat() if interrupted_ts else None)}"
         )
 
-        # Update transcript + working memory with what was actually sent (with per-bubble timestamps)
-        sent_msgs: List[Message] = []
-        for t, ts in sent_pairs:
-            m = Message(role=MessageRole.ALICE, text=t, ts=ts)
-            sent_msgs.append(m)
-            self._append_recent(m)
-
-        if self.transcript_sink and sent_msgs:
-            self.transcript_sink.append(sent_msgs)
+        # NOTE:
+        # - Do NOT append transcript again based on sent_pairs; it would duplicate writes.
+        # - sent_msgs is already populated in-order, one-by-one as bubbles were sent.
 
         # 7) Update chat state with AliceMessageEvent
         if sent_pairs:
@@ -568,9 +589,11 @@ class Orchestrator:
         return None, None
 
     def _send_with_interrupt(
-        self,
-        texts: List[str],
-        base_now: datetime
+            self,
+            texts: List[str],
+            base_now: datetime,
+            *,
+            emit: Optional[Callable[[str, datetime], None]] = None,  # NEW
     ) -> Tuple[List[Tuple[str, datetime]], Optional[str], Optional[datetime]]:
         """
         Send bubble-by-bubble and stop if user interrupts mid-turn.
@@ -591,12 +614,19 @@ class Orchestrator:
             ts = base_now + timedelta(seconds=elapsed_s)
             sent.append((t, ts))
 
-            # stream to UI immediately when this bubble is "sent"
-            if self.on_bubble_sent is not None:
+            # NEW: emit immediately (caller can persist transcript per-bubble)
+            if emit is not None:
                 try:
-                    self.on_bubble_sent(t, ts)
+                    emit(t, ts)
                 except Exception:
                     pass
+            else:
+                # backward compatible: still stream to UI immediately
+                if self.on_bubble_sent is not None:
+                    try:
+                        self.on_bubble_sent(t, ts)
+                    except Exception:
+                        pass
 
             # After last bubble, don't wait, but still allow immediate interrupt capture
             if i == len(texts) - 1:

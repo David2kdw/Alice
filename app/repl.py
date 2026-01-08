@@ -15,6 +15,10 @@ from Services.session_manager import SessionConfig, SessionManager
 from Infra.openai_responses_client import OpenAIResponsesClient
 from Services.openai_speaker import OpenAISpeaker
 from Services.llm_director import LLMDirector
+from Infra.jsonl_transcript_sink import JSONLTranscriptSink
+from Infra.sqlite_state_store import SQLiteStateStore
+from Services.sklearn_transcript_index import SklearnTranscriptIndex
+from Infra.jsonl_transcript_reader import JSONLTranscriptReader
 
 UserItem = Tuple[str, datetime]  # (text, typed_ts)
 
@@ -96,14 +100,23 @@ def main() -> None:
 
     client = OpenAIResponsesClient(model="gpt-4o")
     client2 = OpenAIResponsesClient(model="gpt-5")
-    director = LLMDirector(client=client2)
+    director = LLMDirector(client=client)
     speaker = OpenAISpeaker(client=client)
 
+    reader = JSONLTranscriptReader(path="transcript.jsonl")
     store = InMemoryStateStore()
-    transcript = TranscriptSink()
+    transcript = JSONLTranscriptSink(path="transcript.jsonl")
+    index = SklearnTranscriptIndex(
+        reader=reader,
+        max_index_messages=1200,
+        analyzer="char",
+        ngram_range=(2, 4),
+        recency_boost=0.15,
+        min_similarity=0.0,
+    )
     clock = SystemClock()
 
-    flags = {"debug": False, "state": False, "ticks": False}
+    flags = {"debug": True, "state": False, "ticks": False}
 
     user_q: "queue.Queue[UserItem]" = queue.Queue()
     stop = threading.Event()
@@ -199,12 +212,14 @@ def main() -> None:
         state_store=store,
         clock=clock,
         transcript_sink=transcript,
+        transcript_index=index,
         poll_user_message=poll_user_message,   # may return (text, typed_ts)
         on_bubble_sent=on_bubble_sent,         # streaming
         working_memory_max_messages=60,
+        debug=True
     )
 
-    tick_interval = 1.0
+    tick_interval = 2.0
 
     def after_step(out, *, is_tick: bool) -> None:
         # Don't print out.messages here (streamed already)
