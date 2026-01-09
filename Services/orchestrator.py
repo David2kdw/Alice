@@ -20,6 +20,7 @@ from Domain.models import (
     WorldState,
 )
 from Domain.schemas import Plan
+from Infra.jsonl_memory_store import JsonlMemoryStore
 from Services.session_manager import SessionManager, SpeakPermissions
 
 import random
@@ -57,8 +58,8 @@ class ISpeaker(Protocol):
 
 
 class IMemoryWriter(Protocol):
-    # Keep for later; no-op initially
-    def extract(self, ctx: "DecisionContext", interaction: "Interaction") -> None: ...
+    def apply(self, ctx: "DecisionContext", interaction: "Interaction", ops: "MemoryOps") -> None: ...
+
 
 
 class ITranscriptIndex(Protocol):
@@ -89,6 +90,7 @@ class DecisionContext:
 
     # minimal working memory
     recent_dialogue: Tuple[Message, ...] = ()
+    long_term_memories: Tuple[str, ...] = ()
     # retrieval results (semantic memories + transcript chunks) later
     retrieved_texts: Tuple[str, ...] = ()
 
@@ -157,6 +159,11 @@ class Orchestrator:
         director_throttle_active_s: int = 60,
         director_throttle_waiting_s: int = 60,
         director_throttle_idle_s: int = 300,
+
+        memory_store: Optional[JsonlMemoryStore] = None,
+        memory_context_limit: int = 200,
+        memory_context_max_chars: int = 4000,
+
     ):
         self.sm = session_manager
         self.director = director
@@ -199,6 +206,10 @@ class Orchestrator:
         self.director_throttle_active_s = int(director_throttle_active_s)
         self.director_throttle_waiting_s = int(director_throttle_waiting_s)
         self.director_throttle_idle_s = int(director_throttle_idle_s)
+
+        self.memory_store = memory_store
+        self.memory_context_limit = int(memory_context_limit)
+        self.memory_context_max_chars = int(memory_context_max_chars)
 
     # ---------
     # Public API
@@ -324,6 +335,18 @@ class Orchestrator:
             f"retrieval query={retrieval_query!r} hits={len(retrieved_texts)} preview={retrieved_preview}"
         )
 
+        long_term_memories: Tuple[str, ...] = ()
+        if self.memory_store is not None:
+            try:
+                mem_snips = self.memory_store.format_for_context(
+                    limit=self.memory_context_limit,
+                    max_chars=self.memory_context_max_chars,
+                )
+                long_term_memories = tuple(mem_snips)
+            except Exception as e:
+                self._dbg(f"memory_store read error: {e!r}")
+                long_term_memories = ()
+
         # Build context for downstream decision
         ctx = DecisionContext(
             now=now,
@@ -332,6 +355,7 @@ class Orchestrator:
             chat=chat,
             perms=perms,
             recent_dialogue=tuple(self._recent[-self.working_memory_max_messages:]) if self.working_memory_max_messages else (),
+            long_term_memories=long_term_memories,
             retrieved_texts=retrieved_texts,
         )
 
@@ -480,15 +504,25 @@ class Orchestrator:
         )
         self.state_store.save(new_bundle)
 
-        # memory writing hook
-        if self.memory_writer:
+        # memory writing hook (Director-controlled)
+        if self.memory_writer and plan is not None:
             try:
-                self.memory_writer.extract(
-                    ctx,
-                    Interaction(user_input=user_input, sent_texts=tuple(sent_texts), plan=plan),
-                )
-            except Exception:
-                pass
+                ops = plan.memory_ops
+                # 建议：只在确实发出了 bubble 时才允许写长期记忆（更安全）
+                if getattr(ops, "action", "NONE") == "WRITE" and sent_texts:
+                    # user_input 在这个分支通常是 None（因为用户输入在前面被 buffering return 了）
+                    # 所以用 retrieval_query（最后一条 user 话）当作 interaction.user_input 更合理
+                    self.memory_writer.apply(
+                        ctx,
+                        Interaction(
+                            user_input=(retrieval_query or None),
+                            sent_texts=tuple(sent_texts),
+                            plan=plan,
+                        ),
+                        ops,
+                    )
+            except Exception as e:
+                self._dbg(f"memory_writer error: {e!r}")
 
         plan_debug: Dict[str, Any] = {
             "action": plan.action,

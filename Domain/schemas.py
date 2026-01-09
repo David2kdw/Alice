@@ -99,6 +99,8 @@ class Plan(BaseModel):
         description="Optional self-reported confidence for the plan.",
     )
 
+    memory_ops: "MemoryOps" = Field(default_factory=lambda: MemoryOps())
+
     @model_validator(mode="after")
     def _validate_bubble_count(self) -> "Plan":
         # Enforce bubble_count_target <= max_bubbles_hard
@@ -112,39 +114,12 @@ class Plan(BaseModel):
         # Alternatively you can set it to 0 and widen constraints.
         return self
 
-
-class MemoryRecordDraft(BaseModel):
-    """
-    Draft record to be persisted. ID is assigned by storage layer.
-    """
-    type: MemoryType = Field(..., description="episodic/semantic/profile")
-    text: str = Field(..., min_length=1, description="Memory text content.")
-    importance: float = Field(0.5, ge=0.0, le=1.0)
+class MemoryOps(BaseModel):
+    action: Literal["NONE", "WRITE"] = "NONE"
+    title: str = ""
+    content: str = ""  # 1~3句，短
     tags: List[str] = Field(default_factory=list)
-    source: str = Field("", description="Where it came from, e.g., chat turn id.")
-
-
-class SemanticUpdateDraft(BaseModel):
-    """
-    Update to semantic/profile summary (optional, sparse).
-    """
-    key: str = Field(
-        ...,
-        description="Which semantic slot to update, e.g., 'user_preferences' or 'relationship_summary'.",
-    )
-    text: str = Field(..., description="New summary text (compact).")
-    importance: float = Field(0.7, ge=0.0, le=1.0)
-
-
-class MemoryWrite(BaseModel):
-    """
-    MemoryWriter output contract.
-    """
-    new_records: List[MemoryRecordDraft] = Field(default_factory=list)
-    semantic_updates: List[SemanticUpdateDraft] = Field(default_factory=list)
-
-    # For debugging or later ranking:
-    notes: Optional[str] = Field(None, description="Optional internal notes (not shown to user).")
+    importance: float = Field(0.0, ge=0.0, le=1.0)
 
 
 def _force_openai_strict(schema: Any) -> Any:
@@ -179,8 +154,3 @@ def _force_openai_strict(schema: Any) -> Any:
 def plan_json_schema() -> dict:
     s = deepcopy(Plan.model_json_schema())
     return _force_openai_strict(s)
-
-
-def memory_write_json_schema() -> dict:
-    """Convenience: JSON schema for MemoryWrite for strict LLM output."""
-    return MemoryWrite.model_json_schema()

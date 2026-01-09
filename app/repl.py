@@ -19,6 +19,8 @@ from Infra.jsonl_transcript_sink import JSONLTranscriptSink
 from Infra.sqlite_state_store import SQLiteStateStore
 from Services.sklearn_transcript_index import SklearnTranscriptIndex
 from Infra.jsonl_transcript_reader import JSONLTranscriptReader
+from Infra.jsonl_memory_store import JsonlMemoryStore
+from Services.director_memory_writer import DirectorMemoryWriter
 
 UserItem = Tuple[str, datetime]  # (text, typed_ts)
 
@@ -115,6 +117,8 @@ def main() -> None:
         min_similarity=0.0,
     )
     clock = SystemClock()
+    mem_store = JsonlMemoryStore("memories.jsonl")
+    mem_writer = DirectorMemoryWriter(store=mem_store, dbg=print)
 
     flags = {"debug": True, "state": False, "ticks": False}
 
@@ -211,12 +215,18 @@ def main() -> None:
         speaker=speaker,
         state_store=store,
         clock=clock,
+
         transcript_sink=transcript,
         transcript_index=index,
-        poll_user_message=poll_user_message,   # may return (text, typed_ts)
-        on_bubble_sent=on_bubble_sent,         # streaming
+
+        # ✅ long-term memory
+        memory_store=mem_store,  # 用于 ctx.long_term_memories
+        memory_writer=mem_writer,  # 用于 plan.memory_ops -> 落盘
+
+        poll_user_message=poll_user_message,  # may return (text, typed_ts)
+        on_bubble_sent=on_bubble_sent,  # streaming
         working_memory_max_messages=60,
-        debug=True
+        debug=True,
     )
 
     tick_interval = 2.0
